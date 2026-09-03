@@ -1,0 +1,11 @@
+# Modules 1-5 environment. Keep the hosted Qwen server in a separate environment.
+torch
+torchvision
+transformers==4.47.0
+captum
+numpy
+opencv-python
+albumentations
+timm
+pydicom
+safetensors

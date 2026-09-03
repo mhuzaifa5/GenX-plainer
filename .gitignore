@@ -1,0 +1,33 @@
+# Python environments
+venv/
+.venv/
+.pipeline-venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Generated pipeline artifacts
+outputs/
+outputs_smoke_test/
+xai_results/
+
+# Large model files
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+
+# Generated arrays
+*.npz
+*.npy
+
+# Potentially sensitive medical images
+*.dcm
+chest_xray.png
+
+# Secrets and editor files
+.env
+.env.*
+.vscode/
+.idea/
