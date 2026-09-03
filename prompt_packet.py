@@ -113,7 +113,7 @@ def build_prompt_packet(
     if not resolved_overlay.is_file():
         raise FileNotFoundError(f"Overlay does not exist: {resolved_overlay}")
 
-    region_records = summarize_region_attribution(attribution, segmentation)
+    region_records = summarize_region_attribution(attribution, segmentation, top_n=8)
     detections = [
         {
             "label": item.label,
@@ -137,6 +137,52 @@ def build_prompt_packet(
         "segmentation": segmentation.metadata(),
         "knowledge_base": knowledge.as_dict(),
     }
+
+    # Compact projection for Qwen. Full precision and provenance stay in evidence.json.
+    compact_detections = [
+        {
+            "label": item["label"],
+            "score": round(float(item["score"]), 3),
+            "box_xyxy": item["box_xyxy"],
+        }
+        for item in detections
+    ]
+    compact_classifier = {
+        "predicted_class": prediction.predicted_class,
+        "detection_threshold": round(prediction.detection_threshold, 3),
+        "qualifying_detections": compact_detections,
+    }
+    compact_regions = [
+        {
+            "region": record["region_name"],
+            "mean_absolute_attribution": round(
+                float(record["mean_absolute_attribution"]), 6
+            ),
+            "attribution_fraction_total": round(
+                float(record["attribution_fraction_total"]), 4
+            ),
+            "signed_mean_attribution": round(
+                float(record["signed_mean_attribution"]), 6
+            ),
+        }
+        for record in region_records[:3]
+    ]
+    compact_segmentation = {
+        "status": segmentation.status,
+        "coordinate_space": segmentation.coordinate_space,
+        "zones": "upper/middle/lower thirds, each split medial/lateral",
+        "laterality": "image-left=anatomical right; image-right=anatomical left",
+    }
+    compact_knowledge = [
+        {
+            "finding": record.finding_label,
+            "relation": record.relation,
+            "source": record.source,
+            "finding_uri": record.finding_rgo_uri,
+            "mapping_status": record.mapping_status,
+        }
+        for record in knowledge.records[:3]
+    ]
 
     if prediction.predicted_class == "pneumonia":
         attribution_guidance = (
@@ -163,21 +209,21 @@ def build_prompt_packet(
             "score; use only the qualifying detection scores supplied below."
         ),
         "Classifier decision and qualifying boxes:\n"
-        + json.dumps(evidence["classifier"], indent=2),
+        + json.dumps(compact_classifier, indent=2),
         attribution_guidance,
         "Quantitative attribution by anatomical region:\n"
-        + json.dumps(region_records, indent=2),
+        + json.dumps(compact_regions, indent=2),
         (
             "The anatomical zones are geometric subdivisions of predicted masks and "
             "may be imperfect. Image-left corresponds to anatomical right on a standard "
-            "frontal display. Segmentation metadata:\n"
-            + json.dumps(segmentation.metadata(), indent=2)
+            "frontal display. Segmentation summary:\n"
+            + json.dumps(compact_segmentation, indent=2)
         ),
         (
             "The following ontology records are general possible relationships, not "
             "patient-specific observations. Do not assert a KB concept unless the "
             "images and supplied case evidence support it:\n"
-            + json.dumps(knowledge.as_dict(), indent=2)
+            + json.dumps(compact_knowledge, indent=2)
         ),
         (
             "Use only the original image and this frozen evidence packet. Clearly mark "
@@ -223,11 +269,10 @@ def save_prompt_packet(packet: PromptPacket, output_dir: str | Path) -> dict[str
     packet_path.write_text(
         json.dumps(
             {
-                **packet.metadata(),
+                "case_id": packet.case_id,
                 "prompt": packet.prompt_text,
-                "evidence": packet.evidence,
-                "response_template": packet.response_template,
                 "attachments": copied_attachments,
+                "response_format": "json",
             },
             indent=2,
         ),
