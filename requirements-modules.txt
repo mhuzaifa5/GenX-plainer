@@ -9,3 +9,4 @@ albumentations
 timm
 pydicom
 safetensors
+openai>=1.0
