@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -20,6 +21,7 @@ from overlay import create_overlay, save_overlay
 from prompt_packet import build_prompt_packet, save_prompt_packet
 from qwen_client import query_qwen, save_qwen_result
 from segmentation import ChestXraySegmenter
+from session_management import complete_case, create_case
 from xai import PneumoniaAttributor
 
 
@@ -33,10 +35,17 @@ def run_pipeline(
     qwen_model: str = "Qwen/Qwen3.5-9B",
     qwen_max_tokens: int = 1200,
     skip_qwen: bool = False,
+    session_id: str | None = None,
 ) -> dict[str, object]:
     """Run the available modules and persist their structured artifacts."""
     print("[1/8] Loading and preprocessing image...")
     image = load_image(image_path)
+    case, stored_image = create_case(output_root, image.path, session_id)
+    image = replace(image, path=stored_image, image_id=case.case_id)
+    case_dir = case.case_dir
+    print(f"Session ID: {case.session_id}")
+    print(f"Case ID:    {case.case_id}")
+    print(f"Chat ID:    {case.chat_id}")
 
     print("[2/8] Loading classifier and predicting boxes...")
     classifier = PneumoniaClassifier(weights_path)
@@ -49,9 +58,6 @@ def run_pipeline(
     print("[4/8] Loading segmentation model and predicting anatomy...")
     segmenter = ChestXraySegmenter()
     segmentation = segmenter.segment_image_data(image)
-
-    case_dir = Path(output_root).expanduser().resolve() / image.image_id
-    case_dir.mkdir(parents=True, exist_ok=True)
 
     print("[5/8] Retrieving grounded knowledge...")
     knowledge = PneumoniaKnowledgeRetriever(kb_path).retrieve(
@@ -104,6 +110,7 @@ def run_pipeline(
     )
 
     record: dict[str, object] = {
+        "session": case.metadata(),
         "image": image.metadata(),
         "prediction": prediction.as_dict(),
         "segmentation": segmentation.metadata(),
@@ -128,6 +135,7 @@ def run_pipeline(
     }
     record_path = case_dir / "pipeline_results.json"
     record_path.write_text(json.dumps(record, indent=2), encoding="utf-8")
+    complete_case(case)
 
     print("Pipeline completed.")
     print(f"Prediction: {prediction.predicted_class}")
@@ -171,6 +179,11 @@ def main() -> None:
         help="Directory for pipeline artifacts",
     )
     parser.add_argument(
+        "--session-id",
+        default=None,
+        help="Existing session ID; omit to start a new session",
+    )
+    parser.add_argument(
         "--ig-steps",
         type=int,
         default=20,
@@ -203,6 +216,7 @@ def main() -> None:
         args.qwen_model,
         args.qwen_max_tokens,
         args.skip_qwen,
+        args.session_id,
     )
 
 
