@@ -138,22 +138,32 @@ def build_prompt_packet(
         "knowledge_base": knowledge.as_dict(),
     }
 
-    # Compact projection for Qwen. Full precision and provenance stay in evidence.json.
+    # Compact, typed projection for Qwen. Full precision stays in evidence.json.
     compact_detections = [
         {
+            "detection_id": f"det_{index}",
             "label": item["label"],
             "score": round(float(item["score"]), 3),
             "box_xyxy": item["box_xyxy"],
+            "coordinate_space": prediction.coordinate_space,
         }
-        for item in detections
+        for index, item in enumerate(detections, start=1)
     ]
-    compact_classifier = {
+    compact_decision = {
+        "evidence_type": "detector_output",
+        "model": "Faster R-CNN",
         "predicted_class": prediction.predicted_class,
         "detection_threshold": round(prediction.detection_threshold, 3),
+        "decision_rule": (
+            "pneumonia if at least one class-1 detection score meets threshold; "
+            "otherwise normal"
+        ),
+        "score_semantics": "model detection score; not a calibrated disease probability",
         "qualifying_detections": compact_detections,
     }
     compact_regions = [
         {
+            "rank": rank,
             "region": record["region_name"],
             "mean_absolute_attribution": round(
                 float(record["mean_absolute_attribution"]), 6
@@ -165,71 +175,96 @@ def build_prompt_packet(
                 float(record["signed_mean_attribution"]), 6
             ),
         }
-        for record in region_records[:3]
+        for rank, record in enumerate(region_records[:3], start=1)
     ]
     compact_segmentation = {
+        "evidence_type": "predicted_anatomical_segmentation",
         "status": segmentation.status,
         "coordinate_space": segmentation.coordinate_space,
-        "zones": "upper/middle/lower thirds, each split medial/lateral",
+        "region_definition": "upper/middle/lower thirds, each split medial/lateral",
         "laterality": "image-left=anatomical right; image-right=anatomical left",
     }
     compact_knowledge = [
         {
+            "record_id": f"kb_{index}",
             "finding": record.finding_label,
             "relation": record.relation,
             "source": record.source,
             "finding_uri": record.finding_rgo_uri,
             "mapping_status": record.mapping_status,
         }
-        for record in knowledge.records[:3]
+        for index, record in enumerate(knowledge.records[:3], start=1)
     ]
 
     if prediction.predicted_class == "pneumonia":
-        attribution_guidance = (
-            "Integrated Gradients indicates pixels and regions influential to the "
-            "qualifying pneumonia detection and is not proof of pathology. Positive "
-            "signed attribution supports the detection relative to the black baseline; "
-            "negative attribution opposes it. Mean absolute attribution is normalized "
-            "by region size and is the primary regional ranking metric."
-        )
+        attribution_status = "available_for_qualifying_pneumonia_detection"
     else:
-        attribution_guidance = (
-            "No pneumonia detection met the classifier threshold, so there is no "
-            "qualifying pneumonia target. Attribution arrays and regional attribution "
-            "records are intentionally empty/zero; do not interpret sub-threshold candidates."
-        )
+        attribution_status = "no_qualifying_target_zero_attribution"
+
+    compact_attribution = {
+        "evidence_type": "model_attribution",
+        "method": attribution.method,
+        "status": attribution_status,
+        "target": attribution.target,
+        "target_score": round(float(attribution.target_score), 3),
+        "baseline": "black image",
+        "ranking_metric": "mean_absolute_attribution",
+        "ranking_semantics": "model influence normalized by region pixel count",
+        "top_regions": compact_regions,
+        "limitations": (
+            "Attribution indicates influence on the selected model output, not a semantic "
+            "finding, pathology location, severity, diagnosis, or probability."
+        ),
+    }
+
+    compact_relationships = {
+        "detector_box_intersects_anatomical_regions": knowledge.box_overlap_regions,
+        "intersection_definition": (
+            "at least one qualifying detection-box pixel intersects the predicted region mask"
+        ),
+        "interpretation_limit": (
+            "geometric intersection is not proof that pathology is present in that region"
+        ),
+    }
+
+    llm_evidence = {
+        "schema_version": "1.0",
+        "case_id": image.image_id,
+        "attachments": [
+            {"position": 1, "role": "original_chest_xray"},
+            {
+                "position": 2,
+                "role": "visual_overlay_of_detector_attribution_and_segmentation",
+            },
+        ],
+        "model_decision": compact_decision,
+        "model_attribution": compact_attribution,
+        "anatomical_segmentation": compact_segmentation,
+        "computed_spatial_relationships": compact_relationships,
+        "knowledge_base": {
+            "status": knowledge.status,
+            "semantics": (
+                "general ontology associations; not patient-specific image findings"
+            ),
+            "records": compact_knowledge,
+        },
+    }
 
     sections = [
-        DIAGNOSTIC_QUESTION,
-        "Return only valid JSON matching this exact shape:\n"
-        + json.dumps(RESPONSE_TEMPLATE, indent=2),
+        "TASK:\n" + DIAGNOSTIC_QUESTION,
         (
-            "Confidence must be between 0 and 1. The detector output is auxiliary "
-            "model evidence, not ground truth. Do not invent a global classifier "
-            "score; use only the qualifying detection scores supplied below."
+            "INTERPRETATION RULES:\n"
+            "- Use only the two images and INPUT_EVIDENCE.\n"
+            "- Keep image observations, model outputs, attribution, anatomy, and KB facts separate.\n"
+            "- Do not treat model scores as disease probabilities or model evidence as ground truth.\n"
+            "- Do not infer a recognized finding, causation, location, or severity from attribution.\n"
+            "- Use only the supplied computed relationship for spatial-intersection claims.\n"
+            "- State uncertainty and place unsupported/conflicting claims in the designated field.\n"
+            "- Do not invent a global classifier score."
         ),
-        "Classifier decision and qualifying boxes:\n"
-        + json.dumps(compact_classifier, indent=2),
-        attribution_guidance,
-        "Quantitative attribution by anatomical region:\n"
-        + json.dumps(compact_regions, indent=2),
-        (
-            "The anatomical zones are geometric subdivisions of predicted masks and "
-            "may be imperfect. Image-left corresponds to anatomical right on a standard "
-            "frontal display. Segmentation summary:\n"
-            + json.dumps(compact_segmentation, indent=2)
-        ),
-        (
-            "The following ontology records are general possible relationships, not "
-            "patient-specific observations. Do not assert a KB concept unless the "
-            "images and supplied case evidence support it:\n"
-            + json.dumps(compact_knowledge, indent=2)
-        ),
-        (
-            "Use only the original image and this frozen evidence packet. Clearly mark "
-            "uncertainty, separate image observations from model-derived evidence, and "
-            "place unsupported or conflicting suggestions in the designated JSON field."
-        ),
+        "INPUT_EVIDENCE:\n" + json.dumps(llm_evidence, indent=2),
+        "OUTPUT_SCHEMA:\n" + json.dumps(RESPONSE_TEMPLATE, indent=2),
+        "Return only one valid JSON object matching OUTPUT_SCHEMA. Confidence must be 0 to 1.",
     ]
     return PromptPacket(
         case_id=image.image_id,
