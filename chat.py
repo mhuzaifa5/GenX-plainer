@@ -25,7 +25,6 @@ Return only valid JSON with this shape:
 {
   "answer": "",
   "case_evidence_used": [],
-  "kb_sources_used": [],
   "general_information": [],
   "limitations": []
 }
@@ -75,7 +74,6 @@ def _validate_response(value: dict[str, object]) -> None:
     required = {
         "answer": str,
         "case_evidence_used": list,
-        "kb_sources_used": list,
         "general_information": list,
         "limitations": list,
     }

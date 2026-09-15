@@ -11,7 +11,6 @@ import numpy as np
 
 from classifier import ClassificationResult
 from image_processing import ImageData
-from knowledge_retrieval import KnowledgeRetrievalResult
 from segmentation import SegmentationResult
 from xai import AttributionResult
 
@@ -100,12 +99,32 @@ def summarize_region_attribution(
     return records[:top_n]
 
 
+def box_overlap_regions(
+    prediction: ClassificationResult,
+    segmentation: SegmentationResult,
+) -> list[str]:
+    """Return anatomical regions intersected by qualifying detector boxes."""
+    height, width = segmentation.class_map.shape
+    overlaps: set[str] = set()
+    for detection in prediction.detections:
+        if detection.label_id != 1 or detection.score < prediction.detection_threshold:
+            continue
+        x1, y1, x2, y2 = detection.box
+        x1, x2 = max(0, x1), min(width, x2)
+        y1, y2 = max(0, y1), min(height, y2)
+        if x2 <= x1 or y2 <= y1:
+            continue
+        for name, mask in segmentation.regions.items():
+            if name != "heart" and np.asarray(mask)[y1:y2, x1:x2].any():
+                overlaps.add(name)
+    return sorted(overlaps)
+
+
 def build_prompt_packet(
     image: ImageData,
     prediction: ClassificationResult,
     attribution: AttributionResult,
     segmentation: SegmentationResult,
-    knowledge: KnowledgeRetrievalResult,
     overlay_path: str | Path,
 ) -> PromptPacket:
     """Create a frozen prompt from upstream evidence without calling an LLM."""
@@ -135,7 +154,6 @@ def build_prompt_packet(
             "regional_summary": region_records,
         },
         "segmentation": segmentation.metadata(),
-        "knowledge_base": knowledge.as_dict(),
     }
 
     # Compact, typed projection for Qwen. Full precision stays in evidence.json.
@@ -184,18 +202,6 @@ def build_prompt_packet(
         "region_definition": "upper/middle/lower thirds, each split medial/lateral",
         "laterality": "image-left=anatomical right; image-right=anatomical left",
     }
-    compact_knowledge = [
-        {
-            "record_id": f"kb_{index}",
-            "finding": record.finding_label,
-            "relation": record.relation,
-            "source": record.source,
-            "finding_uri": record.finding_rgo_uri,
-            "mapping_status": record.mapping_status,
-        }
-        for index, record in enumerate(knowledge.records[:3], start=1)
-    ]
-
     if prediction.predicted_class == "pneumonia":
         attribution_status = "available_for_qualifying_pneumonia_detection"
     else:
@@ -218,7 +224,7 @@ def build_prompt_packet(
     }
 
     compact_relationships = {
-        "detector_box_intersects_anatomical_regions": knowledge.box_overlap_regions,
+        "detector_box_intersects_anatomical_regions": box_overlap_regions(prediction, segmentation),
         "intersection_definition": (
             "at least one qualifying detection-box pixel intersects the predicted region mask"
         ),
@@ -241,13 +247,6 @@ def build_prompt_packet(
         "model_attribution": compact_attribution,
         "anatomical_segmentation": compact_segmentation,
         "computed_spatial_relationships": compact_relationships,
-        "knowledge_base": {
-            "status": knowledge.status,
-            "semantics": (
-                "general ontology associations; not patient-specific image findings"
-            ),
-            "records": compact_knowledge,
-        },
     }
 
     sections = [
@@ -255,7 +254,7 @@ def build_prompt_packet(
         (
             "INTERPRETATION RULES:\n"
             "- Use only the two images and INPUT_EVIDENCE.\n"
-            "- Keep image observations, model outputs, attribution, anatomy, and KB facts separate.\n"
+            "- Keep image observations, model outputs, attribution, and anatomy separate.\n"
             "- Do not treat model scores as disease probabilities or model evidence as ground truth.\n"
             "- Do not infer a recognized finding, causation, location, or severity from attribution.\n"
             "- Use only the supplied computed relationship for spatial-intersection claims.\n"

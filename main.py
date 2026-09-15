@@ -1,6 +1,6 @@
 """Run the GenXplainer evidence and Qwen pipeline end to end.
 
-Pipeline: image processing -> classifier -> XAI -> segmentation -> KB -> overlay
+Pipeline: image processing -> classifier -> XAI -> segmentation -> overlay
 -> prompt packet -> Qwen.
 """
 
@@ -16,7 +16,6 @@ import numpy as np
 
 from classifier import PneumoniaClassifier
 from image_processing import load_image
-from knowledge_retrieval import PneumoniaKnowledgeRetriever
 from overlay import create_overlay, save_overlay
 from prompt_packet import build_prompt_packet, save_prompt_packet
 from qwen_client import query_qwen, save_qwen_result
@@ -29,7 +28,6 @@ def run_pipeline(
     image_path: str | Path,
     weights_path: str | Path,
     output_root: str | Path,
-    kb_path: str | Path,
     ig_steps: int = 20,
     qwen_base_url: str = "http://127.0.0.1:8080/v1",
     qwen_model: str = "Qwen/Qwen3.5-9B",
@@ -38,7 +36,7 @@ def run_pipeline(
     session_id: str | None = None,
 ) -> dict[str, object]:
     """Run the available modules and persist their structured artifacts."""
-    print("[1/8] Loading and preprocessing image...")
+    print("[1/7] Loading and preprocessing image...")
     image = load_image(image_path)
     case, stored_image = create_case(output_root, image.path, session_id)
     image = replace(image, path=stored_image, image_id=case.case_id)
@@ -47,39 +45,34 @@ def run_pipeline(
     print(f"Case ID:    {case.case_id}")
     print(f"Chat ID:    {case.chat_id}")
 
-    print("[2/8] Loading classifier and predicting boxes...")
+    print("[2/7] Loading classifier and predicting boxes...")
     classifier = PneumoniaClassifier(weights_path)
     prediction = classifier.predict(image)
 
-    print("[3/8] Calculating Integrated Gradients attribution...")
+    print("[3/7] Calculating Integrated Gradients attribution...")
     attributor = PneumoniaAttributor(classifier, n_steps=ig_steps)
     attribution = attributor.attribute(image, prediction)
 
-    print("[4/8] Loading segmentation model and predicting anatomy...")
+    print("[4/7] Loading segmentation model and predicting anatomy...")
     segmenter = ChestXraySegmenter()
     segmentation = segmenter.segment_image_data(image)
 
-    print("[5/8] Retrieving grounded knowledge...")
-    knowledge = PneumoniaKnowledgeRetriever(kb_path).retrieve(
-        prediction, attribution, segmentation
-    )
-
-    print("[6/8] Creating attribution, prediction, and segmentation overlay...")
+    print("[5/7] Creating attribution, prediction, and segmentation overlay...")
     overlay = create_overlay(image, prediction, segmentation, attribution)
     overlay_path = save_overlay(
         overlay, case_dir / "attribution_prediction_segmentation_overlay.png"
     )
 
-    print("[7/8] Building the frozen Qwen prompt packet...")
+    print("[6/7] Building the frozen Qwen prompt packet...")
     prompt_packet = build_prompt_packet(
-        image, prediction, attribution, segmentation, knowledge, overlay_path
+        image, prediction, attribution, segmentation, overlay_path
     )
     prompt_artifacts = save_prompt_packet(prompt_packet, case_dir)
 
     qwen_result = None
     qwen_artifacts: dict[str, Path] = {}
     if not skip_qwen:
-        print("[8/8] Sending the packet to Qwen through local vLLM...")
+        print("[7/7] Sending the packet to Qwen through local vLLM...")
         qwen_result = query_qwen(
             prompt_packet,
             base_url=qwen_base_url,
@@ -115,7 +108,6 @@ def run_pipeline(
         "prediction": prediction.as_dict(),
         "segmentation": segmentation.metadata(),
         "attribution": attribution.metadata(),
-        "knowledge": knowledge.as_dict(),
         "prompt_packet": prompt_packet.metadata(),
         "qwen": qwen_result.metadata() if qwen_result is not None else None,
         "overlay": {
@@ -154,12 +146,6 @@ def run_pipeline(
 def main() -> None:
     module_dir = Path(__file__).resolve().parent
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--kb",
-        type=Path,
-        default=module_dir / "pneumonia_kb.csv",
-        help="Local pneumonia knowledge-base CSV",
-    )
     parser.add_argument(
         "--image",
         type=Path,
@@ -210,7 +196,6 @@ def main() -> None:
         args.image,
         args.weights,
         args.output_dir,
-        args.kb,
         args.ig_steps,
         args.qwen_base_url,
         args.qwen_model,
